@@ -5,14 +5,38 @@ model:
   model_dir: "./"
   name: "mistralai/Mistral-7B-Instruct-v0.3"
   architecture: "causal"           # or "seq2seq"
-  peft_type: "lora"                # or "qlora", "none"
-  lora_r: 32
   quantization: false
-  local_file
+  tokenizer_pad_token: "eos_token"
+  tokenizer_padding_side: "right"
+
+peft:
+  is_peft: true
+  type: "lora"
+  r: 32
+  lora_alpha: 64
+  lora_dropout: 0.05
+  bias: "none"
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+    - "lm_head"
+  task_type: "CAUSAL_LM"
+
+bnb:
+    is_bnb: false
+    bnb_4bit_quant_type: "nf4"
+    bnb_4bit_use_double_quant: true
+    bnb_4bit_compute_dtype: "bfloat16"
 
 dataset:
   name: "mydataset"
-  path: "data/mydata.jsonl"ß
+  path: "data/mydata.jsonl"
+  processed_path: ""
   is_processed: false
   need_special_processing: false
   special_processing_func: ""
@@ -39,3 +63,4 @@ training:
 misc:
   device: "cuda"
   notes: "experiment for Mistral7B with LoRA"
+  log_dir: "logs/default"

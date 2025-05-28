@@ -6,21 +6,27 @@ from transformers import (
     TrainingArguments, 
     Trainer, 
     SFTConfig, 
-    SFTTrainer
+    SFTTrainer,
+    BitsAndBytesConfig
 )
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from datasets import load_dataset
 import torch
+import torch.distributed as dist
 import logging
+from log_setup import setup_logging
 
 from src.data.transforms import SPECIAL_PROCESSING_FUNCS
 
-logger = logging.getLogger(__name__)
+
 
 def train_main(config_path: str):
     """Main entry point for training/fine-tuning with config control."""
     # 1. Load config
     cfg = OmegaConf.load(config_path)
+    logger = setup_logging(cfg.misc.log_dir)
     logger.info("Config loaded:\n%s", OmegaConf.to_yaml(cfg))
+    logger.info("--------BEGINNING TRAINING PIPELINE :D--------\n\n")
 
     assert hasattr(cfg, "model"), "Config missing model section"
     assert hasattr(cfg, "training"), "Config missing training section"
@@ -38,9 +44,63 @@ def train_main(config_path: str):
     else:
         raise ValueError("Unknown model architecture: {}".format(cfg.model.architecture))
 
+    if getattr(cfg.bnb, "is_bnb", False): 
+        logger.info("Adding BnB Config..")
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type=cfg.bnb.bnb_4bit_quant_type,
+            bnb_4bit_use_double_quant=cfg.bnb.bnb_4bit_use_double_quant,
+            bnb_4bit_compute_dtype=cfg.bnb.bnb_4bit_compute_dtype,
+        )
+        model = model_class.from_pretrained(
+            model_name_or_path,
+            quantization_config=bnb_config,
+            device_map="auto",
+            trust_remote_code=True
+        )
+    else:
+        logger.info("Skipping BnB Config..")
+        model = model_class.from_pretrained(
+            model_name_or_path,
+            device_map="auto",
+        )
+        
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
-    model = model_class.from_pretrained(model_name_or_path)
-    model.to(cfg.misc.device)
+    if hasattr(cfg.model, "tokenizer_pad_token"):
+        if cfg.model.tokenizer_pad_token == "eos_token":
+            tokenizer.pad_token = tokenizer.eos_token
+        # else: Don't set it right now.
+        
+    # Set padding side if specified in config
+    if hasattr(cfg.model, "tokenizer_padding_side"):
+        tokenizer.padding_side = cfg.model.tokenizer_padding_side
+        
+    # model.to(cfg.misc.device) DO I NEED THIS? LAST TIME IT MESSED WITH MULTI-GPU USAGE
+
+    if getattr(cfg.peft, "is_peft", False):
+        logger.info("Adding PEFT Config...")
+        model = prepare_model_for_kbit_training(model) # should be universal for any quantization
+        if cfg.peft.type == "lora":
+            peft_cfg = LoraConfig(
+                r=cfg.peft.r,
+                lora_alpha=cfg.peft.lora_alpha,
+                lora_dropout=cfg.peft.lora_dropout,
+                bias=cfg.peft.bias,
+                target_modules=cfg.peft.target_modules,
+                task_type=cfg.peft.task_type,
+            )
+            model = get_peft_model(model, peft_cfg)
+            logger.info("LoRA applied :D")
+        elif cfg.peft.type == "qlora":
+            # QLoRA setup (bitsandbytes + LoRA config)
+            pass
+        elif cfg.peft.type == "bnb":
+            # BitsAndBytes quantization config
+            pass
+        else:
+            raise ValueError(f"Unknown PEFT type: {cfg.peft.type}")
+    else:
+        logger.info("Skipping PEFT Config...")
 
     # 3. Data loading
     ds = load_dataset("json", data_files={"train": cfg.dataset.path})
@@ -54,15 +114,9 @@ def train_main(config_path: str):
             raise ValueError(f"Special processing function '{func_name}' not found in registry.")
         logger.info(f"Applying special processing function: {func_name}")
         train_dataset = SPECIAL_PROCESSING_FUNCS[func_name](train_dataset, cfg)
+    else:
+        logger.info("Dataset DOES NOT need special processing; Using the stored processed version...")
 
-    # 5. Tokenization
-    def tokenize_fn(examples):
-        return tokenizer(
-            examples["text"], 
-            max_length=cfg.dataset.max_input_len, 
-            truncation=True, 
-            padding="max_length"
-        )
     train_dataset = train_dataset.map(tokenize_fn, batched=True)
 
     # 6. Training arguments
@@ -121,7 +175,17 @@ def train_main(config_path: str):
     torch.manual_seed(cfg.training.seed)
 
     # 9. Train and save
-    logger.info("Starting training...")
+    logger.info("%%%% Starting training... %%%%")
     trainer.train()
     trainer.save_model(cfg.training.output_dir)
     logger.info("Training complete. Model saved to %s", cfg.training.output_dir)
+    
+    logger.info("Killing processes & freeing up memory...")
+    del trainer, model, tokenizer
+    if dist.is_available() and dist.is_initialized():
+        dist.destroy_process_group()
+    torch.cuda.empty_cache()        # Release unreferenced memory to CUDA driver
+    torch.cuda.ipc_collect()        # Clean up IPC resources, especially in multi-process setups
+
+    logger.info("--------SHUTTING DOWN TRAINING PIPELINE :D--------\n\n")
+    
