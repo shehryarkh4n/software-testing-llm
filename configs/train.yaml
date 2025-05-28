@@ -1,0 +1,41 @@
+# customizable as needed. maybe explore multiple yaml files?
+
+model:
+  is_local: false
+  model_dir: "./"
+  name: "mistralai/Mistral-7B-Instruct-v0.3"
+  architecture: "causal"           # or "seq2seq"
+  peft_type: "lora"                # or "qlora", "none"
+  lora_r: 32
+  quantization: false
+  local_file
+
+dataset:
+  name: "mydataset"
+  path: "data/mydata.jsonl"ß
+  is_processed: false
+  need_special_processing: false
+  special_processing_func: ""
+  split_seed: 42
+  num_workers: 8
+  batch_size: 4
+  max_input_len: 512
+  max_target_len: 256
+
+training:
+  training_args_type: "SFTConfig"
+  trainer_type: "SFTTrainer"
+  output_dir: "outputs/"
+  num_train_epochs: 3
+  learning_rate: 2e-4
+  gradient_accumulation_steps: 2
+  eval_strategy: "epoch"
+  save_strategy: "epoch"
+  save_total_limit: 2
+  logging_steps: 20
+  report_to: ["tensorboard"]
+  seed: 42
+
+misc:
+  device: "cuda"
+  notes: "experiment for Mistral7B with LoRA"
