@@ -1,0 +1,26 @@
+model:
+  name: "mistralai/Mistral-7B-Instruct-v0.3"
+  architecture: "causal"
+  is_local: false
+
+dataset:
+  path: "data/test.jsonl"
+  max_input_len: 512
+  batch_size: 16
+
+metrics:
+  - name: "bleu"
+    options:
+      smoothing: 1
+  - name: "parse_rate"
+    options: {}
+  - name: "custom_metric"
+    options:
+      param1: "value"
+
+postprocessing:
+  - name: "strip_prompt"
+    options: {}
+  - name: "custom_post"
+    options:
+      param2: 5
