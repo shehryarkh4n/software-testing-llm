@@ -174,4 +174,4 @@ cython_debug/
 .pypirc
 
 # Others
-src/data/datasets
+src/data/datasets/original
