@@ -28,13 +28,5 @@ def evaluate(
     logger.info(f"Starting evaluation using config: {config}")
     evaluate_main(config_path=config)
 
-@app.command()
-def test(
-    config: Path = typer.Option(..., "--config", "-c", help="Path to testing config YAML.")
-):
-    """Test a model on a dataset."""
-    logger.info(f"Starting testing using config: {config}")
-    test_main(config_path=config)
-
 if __name__ == "__main__":
     app()

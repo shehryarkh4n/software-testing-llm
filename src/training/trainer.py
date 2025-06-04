@@ -1,3 +1,5 @@
+from functools import partial
+import os
 from omegaconf import OmegaConf
 from transformers import (
     AutoModelForCausalLM, 
@@ -9,20 +11,21 @@ from transformers import (
     SFTTrainer,
     BitsAndBytesConfig
 )
+from transformers.utils import is_bfloat16_supported
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
 from datasets import load_dataset
 import torch
 import torch.distributed as dist
-import logging
-from log_setup import setup_logging
 
+from bin.log_setup import setup_logging
 from src.data.transforms import SPECIAL_PROCESSING_FUNCS
+
 
 def train_main(config_path: str):
     """Main entry point for training/fine-tuning with config control."""
     # 1. Load config
     cfg = OmegaConf.load(config_path)
-    logger = setup_logging(cfg.misc.log_dir)
+    logger = setup_logging(cfg.misc.log_dir, cfg.misc.log_name)
     logger.info("Config loaded:\n%s", OmegaConf.to_yaml(cfg))
     logger.info("--------BEGINNING TRAINING PIPELINE :D--------\n\n")
 
@@ -64,13 +67,13 @@ def train_main(config_path: str):
         )
         
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
-    if hasattr(cfg.model, "tokenizer_pad_token"):
+    if hasattr(cfg.model, "tokenizer_pad_token") and cfg.model.tokenizer_pad_token:
         if cfg.model.tokenizer_pad_token == "eos_token":
             tokenizer.pad_token = tokenizer.eos_token
         # else: Don't set it right now.
         
     # Set padding side if specified in config
-    if hasattr(cfg.model, "tokenizer_padding_side"):
+    if hasattr(cfg.model, "tokenizer_padding_side") and cfg.model.tokenizer_padding_side:
         tokenizer.padding_side = cfg.model.tokenizer_padding_side
         
     # model.to(cfg.misc.device) DO I NEED THIS? LAST TIME IT MESSED WITH MULTI-GPU USAGE
@@ -101,21 +104,44 @@ def train_main(config_path: str):
         logger.info("Skipping PEFT Config...")
 
     # 3. Data loading
-    ds = load_dataset("json", data_files={"train": cfg.dataset.path})
-    train_dataset = ds["train"]
 
     # 4. Optional special processing
     if getattr(cfg.dataset, "need_special_processing", False):
+        ds = load_dataset("json", data_files={"train": cfg.dataset.path})
+        train_dataset = ds["train"]
+
         logger.info("Dataset needs special processing...")
+        
         func_name = cfg.dataset.special_processing_func
         if func_name not in SPECIAL_PROCESSING_FUNCS:
             raise ValueError(f"Special processing function '{func_name}' not found in registry.")
+        
         logger.info(f"Applying special processing function: {func_name}")
-        train_dataset = SPECIAL_PROCESSING_FUNCS[func_name](train_dataset, cfg)
+        train_dataset = SPECIAL_PROCESSING_FUNCS[func_name](tokenizer, train_dataset)
+        
+        logger.info(f"Saving processed dataset for the model: {cfg.model.name}")
+        output_path = os.path.join(cfg.dataset.processed_path, f"{cfg.model.name}_processed.json")
+        train_dataset.to_json(output_path)
+        logger.info(f"Processed dataset saved at: {output_path}")
     else:
         logger.info("Dataset DOES NOT need special processing; Using the stored processed version...")
+        if cfg.dataset.processed_path:
+            ds = load_dataset("json", data_files={"train": cfg.dataset.processed_path})
+            train_dataset = ds["train"]
+        else:
+            raise ValueError("Special Processing False & No Processed Path Provided")
+    
 
-    train_dataset = train_dataset.map(tokenize_fn, batched=True)
+    if getattr(cfg.dataset, "need_tokenization", False):
+        logger.info("Applying Tokenization to the dataset...")
+        
+        tokenize_func = partial(SPECIAL_PROCESSING_FUNCS[cfg.dataset.tokenizer_func], tokenizer) # ??
+        train_dataset = train_dataset.map(tokenize_func, batched=True, remove_columns=train_dataset.column_names)
+        output_path = os.path.join(cfg.dataset.tokenized_path, f"{cfg.model.name}_tokenized.json")
+        train_dataset.to_json(output_path)
+        logger.info(f"Tokenized dataset saved at: {output_path}")
+    else:
+        logger.info("Skipping tokenization...")
 
     # 6. Training arguments
     if cfg.training.training_args_type == "TrainingArguments":
@@ -131,7 +157,8 @@ def train_main(config_path: str):
             logging_steps=cfg.training.logging_steps,
             report_to=cfg.training.report_to,
             seed=cfg.training.seed,
-            fp16=True if cfg.misc.device == "cuda" else False,
+            fp16=not is_bfloat16_supported(),
+            bf16=is_bfloat16_supported(),
         )
     elif cfg.training.training_args_type == "SFTConfig":
         training_args = SFTConfig(
@@ -146,7 +173,8 @@ def train_main(config_path: str):
             logging_steps=cfg.training.logging_steps,
             report_to=cfg.training.report_to,
             seed=cfg.training.seed,
-            fp16=True if cfg.misc.device == "cuda" else False,
+            fp16=not is_bfloat16_supported(),
+            bf16=is_bfloat16_supported(),   
         )
     else:
         raise ValueError("Unknown TrainingArguments type")
@@ -156,6 +184,7 @@ def train_main(config_path: str):
         trainer = Trainer(
             model=model,
             args=training_args,
+            dataset_text_field=cfg.training.dataset_text_field,
             train_dataset=train_dataset,
             tokenizer=tokenizer,
         )
@@ -163,6 +192,7 @@ def train_main(config_path: str):
         trainer = SFTTrainer(
             model=model,
             args=training_args,
+            dataset_text_field=cfg.training.dataset_text_field,
             train_dataset=train_dataset,
             tokenizer=tokenizer,
         )
