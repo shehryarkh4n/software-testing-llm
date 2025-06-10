@@ -1,5 +1,6 @@
 from functools import partial
 import os
+import time
 from omegaconf import OmegaConf
 from transformers import (
     AutoModelForCausalLM, 
@@ -7,13 +8,11 @@ from transformers import (
     AutoTokenizer, 
     TrainingArguments, 
     Trainer, 
-    SFTConfig, 
-    SFTTrainer,
     BitsAndBytesConfig
 )
-from transformers.utils import is_bfloat16_supported
+from trl import SFTConfig, SFTTrainer
 from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
-from datasets import load_dataset
+from datasets import load_dataset, Dataset, DatasetDict
 import torch
 import torch.distributed as dist
 
@@ -24,6 +23,7 @@ from src.data.transforms import SPECIAL_PROCESSING_FUNCS
 def train_main(config_path: str):
     """Main entry point for training/fine-tuning with config control."""
     # 1. Load config
+    start_time = time.time()
     cfg = OmegaConf.load(config_path)
     logger = setup_logging(cfg.misc.log_dir, cfg.misc.log_name)
     logger.info("Config loaded:\n%s", OmegaConf.to_yaml(cfg))
@@ -56,14 +56,14 @@ def train_main(config_path: str):
         model = model_class.from_pretrained(
             model_name_or_path,
             quantization_config=bnb_config,
-            device_map="auto",
             trust_remote_code=True
         )
     else:
         logger.info("Skipping BnB Config..")
         model = model_class.from_pretrained(
             model_name_or_path,
-            device_map="auto",
+            torch_dtype=torch.bfloat16,
+            trust_remote_code=True
         )
         
     tokenizer = AutoTokenizer.from_pretrained(model_name_or_path)
@@ -75,8 +75,6 @@ def train_main(config_path: str):
     # Set padding side if specified in config
     if hasattr(cfg.model, "tokenizer_padding_side") and cfg.model.tokenizer_padding_side:
         tokenizer.padding_side = cfg.model.tokenizer_padding_side
-        
-    # model.to(cfg.misc.device) DO I NEED THIS? LAST TIME IT MESSED WITH MULTI-GPU USAGE
 
     if getattr(cfg.peft, "is_peft", False):
         logger.info("Adding PEFT Config...")
@@ -104,44 +102,70 @@ def train_main(config_path: str):
         logger.info("Skipping PEFT Config...")
 
     # 3. Data loading
-
-    # 4. Optional special processing
-    if getattr(cfg.dataset, "need_special_processing", False):
-        ds = load_dataset("json", data_files={"train": cfg.dataset.path})
-        train_dataset = ds["train"]
-
-        logger.info("Dataset needs special processing...")
+    def get_split_dataset(dataset, split_ratio):
+        # split_ratio: [train, eval, test]
+        train_test = dataset.train_test_split(test_size=split_ratio[2])
+        train = train_test['train']
+        test = train_test['test']
+        # Now split train into train and eval
+        eval_size = split_ratio[1] / (split_ratio[0] + split_ratio[1])
+        train_eval = train.train_test_split(test_size=eval_size)
+        train = train_eval['train']
+        eval = train_eval['test']
+        return {'train': train, 'eval': eval, 'test': test}
+    
+    def save_splits(ds_dict, prefix_path):
+        paths = {}
+        for split, ds in ds_dict.items():
+            path = f"{prefix_path}_{split}.json"
+            ds.to_json(path)
+            paths[split] = path
+        return paths
+    
+    def load_splits(prefix_path):
+        out = {}
+        for split in ["train", "eval", "test"]:
+            path = f"{prefix_path}_{split}.json"
+            out[split] = load_dataset("json", data_files={split: path})[split]
+        return out
         
+    if not getattr(cfg.dataset, "need_tokenization", False):
+        logger.info("Tokenization not required, loading tokenized splits...")
+        train_dataset = load_dataset("json", data_files={"train": cfg.dataset.tokenized_train_location})["train"]
+        eval_dataset  = load_dataset("json", data_files={"eval":  cfg.dataset.tokenized_eval_location})["eval"]
+        test_dataset  = load_dataset("json", data_files={"test":  cfg.dataset.tokenized_test_location})["test"]
+    
+    elif not getattr(cfg.dataset, "need_special_processing", False):
+        logger.info("Special processing not required, loading processed splits for tokenization...")
+        train_dataset = load_dataset("json", data_files={"train": cfg.dataset.processed_train_location})["train"]
+        eval_dataset  = load_dataset("json", data_files={"eval":  cfg.dataset.processed_eval_location})["eval"]
+        test_dataset  = load_dataset("json", data_files={"test":  cfg.dataset.processed_test_location})["test"]
+    
+        # Now tokenize and save
+        tokenize_func = partial(SPECIAL_PROCESSING_FUNCS[cfg.dataset.tokenizer_func], tokenizer, max_input_len=cfg.dataset.max_input_len)
+        for split, ds in [("train", train_dataset), ("eval", eval_dataset), ("test", test_dataset)]:
+            out = ds.map(tokenize_func, batched=True, remove_columns=ds.column_names, num_proc=cfg.training.dataloader_num_workers)
+            out_path = getattr(cfg.dataset.processed_path, f"tokenized_{split}_location")
+            out.to_json(out_path)
+    
+    else:
+        logger.info("Loading raw data, special processing, then split and save...")
+        # Load and process
+        raw_ds = load_dataset("json", data_files={"data": cfg.dataset.path})["data"]
         func_name = cfg.dataset.special_processing_func
         if func_name not in SPECIAL_PROCESSING_FUNCS:
             raise ValueError(f"Special processing function '{func_name}' not found in registry.")
-        
-        logger.info(f"Applying special processing function: {func_name}")
-        train_dataset = SPECIAL_PROCESSING_FUNCS[func_name](tokenizer, train_dataset)
-        
-        logger.info(f"Saving processed dataset for the model: {cfg.model.name}")
-        output_path = os.path.join(cfg.dataset.processed_path, f"{cfg.model.name}_processed.json")
-        train_dataset.to_json(output_path)
-        logger.info(f"Processed dataset saved at: {output_path}")
-    else:
-        logger.info("Dataset DOES NOT need special processing; Using the stored processed version...")
-        if cfg.dataset.processed_path:
-            ds = load_dataset("json", data_files={"train": cfg.dataset.processed_path})
-            train_dataset = ds["train"]
-        else:
-            raise ValueError("Special Processing False & No Processed Path Provided")
-    
-
-    if getattr(cfg.dataset, "need_tokenization", False):
-        logger.info("Applying Tokenization to the dataset...")
-        
-        tokenize_func = partial(SPECIAL_PROCESSING_FUNCS[cfg.dataset.tokenizer_func], tokenizer) # ??
-        train_dataset = train_dataset.map(tokenize_func, batched=True, remove_columns=train_dataset.column_names)
-        output_path = os.path.join(cfg.dataset.tokenized_path, f"{cfg.model.name}_tokenized.json")
-        train_dataset.to_json(output_path)
-        logger.info(f"Tokenized dataset saved at: {output_path}")
-    else:
-        logger.info("Skipping tokenization...")
+        processed_ds = SPECIAL_PROCESSING_FUNCS[func_name](tokenizer, raw_ds)
+        # Split
+        splits = get_split_dataset(processed_ds, cfg.dataset.split)
+        # Save processed splits
+        processed_paths = save_splits(splits, cfg.dataset.processed_path)
+        # Tokenize and save tokenized splits
+        tokenize_func = partial(SPECIAL_PROCESSING_FUNCS[cfg.dataset.tokenizer_func], tokenizer, max_input_len=cfg.dataset.max_input_len)
+        for split, ds in splits.items():
+            out = ds.map(tokenize_func, batched=True, remove_columns=ds.column_names, num_proc=cfg.training.dataloader_num_workers)
+            out_path = getattr(cfg.dataset, f"tokenized_{split}_location")
+            out.to_json(out_path)
 
     # 6. Training arguments
     if cfg.training.training_args_type == "TrainingArguments":
@@ -151,7 +175,7 @@ def train_main(config_path: str):
             per_device_train_batch_size=cfg.dataset.batch_size,
             learning_rate=cfg.training.learning_rate,
             gradient_accumulation_steps=cfg.training.gradient_accumulation_steps,
-            evaluation_strategy=cfg.training.eval_strategy,
+            eval_strategy=cfg.training.eval_strategy,
             save_strategy=cfg.training.save_strategy,
             save_total_limit=cfg.training.save_total_limit,
             logging_steps=cfg.training.logging_steps,
@@ -167,14 +191,19 @@ def train_main(config_path: str):
             per_device_train_batch_size=cfg.dataset.batch_size,
             learning_rate=cfg.training.learning_rate,
             gradient_accumulation_steps=cfg.training.gradient_accumulation_steps,
-            evaluation_strategy=cfg.training.eval_strategy,
+            eval_strategy=cfg.training.eval_strategy,
             save_strategy=cfg.training.save_strategy,
             save_total_limit=cfg.training.save_total_limit,
             logging_steps=cfg.training.logging_steps,
             report_to=cfg.training.report_to,
             seed=cfg.training.seed,
-            fp16=not is_bfloat16_supported(),
-            bf16=is_bfloat16_supported(),   
+            fp16=cfg.training.fp16,
+            bf16=cfg.training.bf16,   
+            dataset_text_field=cfg.training.dataset_text_field,
+            dataloader_num_workers=cfg.training.dataloader_num_workers,
+            ddp_find_unused_parameters=cfg.training.ddp_find_unused_parameters,
+            dataloader_drop_last=getattr(cfg.training, 'dataloader_drop_last', True),
+            remove_unused_columns=getattr(cfg.training, 'remove_unused_columns', False),
         )
     else:
         raise ValueError("Unknown TrainingArguments type")
@@ -184,17 +213,17 @@ def train_main(config_path: str):
         trainer = Trainer(
             model=model,
             args=training_args,
-            dataset_text_field=cfg.training.dataset_text_field,
             train_dataset=train_dataset,
-            tokenizer=tokenizer,
+            eval_dataset=eval_dataset,
+            processing_class=tokenizer,
         )
     elif cfg.training.trainer_type == "SFTTrainer":
         trainer = SFTTrainer(
             model=model,
             args=training_args,
-            dataset_text_field=cfg.training.dataset_text_field,
             train_dataset=train_dataset,
-            tokenizer=tokenizer,
+            eval_dataset=eval_dataset,
+            processing_class=tokenizer,
         )
     else:
         raise ValueError("Unknown Trainer type")
@@ -214,6 +243,7 @@ def train_main(config_path: str):
         dist.destroy_process_group()
     torch.cuda.empty_cache()        # Release unreferenced memory to CUDA driver
     torch.cuda.ipc_collect()        # Clean up IPC resources, especially in multi-process setups
-
+    end_time = time.time()
     logger.info("--------SHUTTING DOWN TRAINING PIPELINE :D--------\n\n")
+    logger.info(f"Training completed in {(end_time - start_time) / 3600:.2f} hours.")
     

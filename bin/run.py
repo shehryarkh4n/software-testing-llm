@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 import typer
 from pathlib import Path
+import sys
 import logging
+sys.path.append(str(Path(__file__).resolve().parent.parent))
 from src.training.trainer import train_main
-from src.evaluation.evaluator import evaluate_main
+# from src.evaluation.evaluator import evaluate_main
 
 app = typer.Typer(add_completion=False)
-
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -20,13 +21,13 @@ def train(
     train_main(config_path=config)
 
 
-@app.command()
-def evaluate(
-    config: Path = typer.Option(..., "--config", "-c", help="Path to evaluation config YAML.")
-):
-    """Evaluate a model on a dataset."""
-    logger.info(f"Starting evaluation using config: {config}")
-    evaluate_main(config_path=config)
+# @app.command()
+# def evaluate(
+#     config: Path = typer.Option(..., "--config", "-c", help="Path to evaluation config YAML.")
+# ):
+#     """Evaluate a model on a dataset."""
+#     logger.info(f"Starting evaluation using config: {config}")
+#     evaluate_main(config_path=config)
 
 if __name__ == "__main__":
     app()
