@@ -176,4 +176,6 @@ cython_debug/
 # Others
 src/data/datasets/
 src/outputs/
+src/evaluation/results/
 logs/
+playground/

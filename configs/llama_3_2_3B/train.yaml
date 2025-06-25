@@ -3,11 +3,12 @@
 model:
   is_local: false
   model_dir: "./"
-  name: "meta-llama/Llama-3.2-1B-Instruct"
+  hf_name: "meta-llama/Llama-3.2-3B-Instruct"
+  name: "llama_3_2_3B_instruct"
   architecture: "causal"        
   quantization: false
   tokenizer_pad_token: "eos_token"
-  tokenizer_padding_side: ""
+  tokenizer_padding_side: "right"
 
 peft:
   is_peft: false
@@ -36,7 +37,6 @@ bnb:
 dataset:
   name: "mydataset"
   path: "src/data/datasets/methods2test/original/master_dataset.json"
-  processed_path: ""
   need_special_processing: false
   special_processing_func: "llama_3_2_1B_template"
   need_tokenization: false
@@ -46,18 +46,18 @@ dataset:
   batch_size: 4
   max_input_len: 720
   max_target_len: 256
-  processed_train_location: "src/data/datasets/methods2test/processed/llama_3_2_1B/processed_train.json"
-  processed_eval_location: "src/data/datasets/methods2test/processed/llama_3_2_1B/processed_eval.json"
-  processed_test_location: "src/data/datasets/methods2test/processed/llama_3_2_1B/processed_test.json"
-  tokenized_train_location: "src/data/datasets/methods2test/tokenized/llama_3_2_1B/tokenized_train.json"
-  tokenized_eval_location: "src/data/datasets/methods2test/tokenized/llama_3_2_1B/tokenized_eval.json"
-  tokenized_test_location: "src/data/datasets/methods2test/tokenized/llama_3_2_1B/tokenized_test.json"
+  processed_train_location: "src/data/datasets/methods2test/processed/llama_3_2_3B/processed_train.json"
+  processed_eval_location: "src/data/datasets/methods2test/processed/llama_3_2_3B/processed_eval.json"
+  processed_test_location: "src/data/datasets/methods2test/processed/llama_3_2_3B/processed_test.json"
+  tokenized_train_location: "src/data/datasets/methods2test/tokenized/llama_3_2_3B/tokenized_train.json"
+  tokenized_eval_location: "src/data/datasets/methods2test/tokenized/llama_3_2_3B/tokenized_eval.json"
+  tokenized_test_location: "src/data/datasets/methods2test/tokenized/llama_3_2_3B/tokenized_test.json"
   split: [0.9, 0.1, 0.1]
 
 training:
   training_args_type: "SFTConfig"
   trainer_type: "SFTTrainer"
-  output_dir: "src/outputs/llama_3_2_1B/"
+  output_dir: "src/outputs/llama_3_2_3B/"
   dataset_text_field: "prompt"
   num_train_epochs: 10
   learning_rate: 0.0002
@@ -75,7 +75,7 @@ training:
   seed: 42
   bf16: true
   fp16: false
-  dataloader_num_workers: 8
+  dataloader_num_workers: 16
   ddp_find_unused_parameters: false
   dataloader_drop_last: true
   remove_unused_columns: false
@@ -84,4 +84,4 @@ misc:
   device: "cuda"
   notes: "experiment for Mistral7B with LoRA"
   log_dir: "logs/default"
-  log_name: "meta-llama_3_2_1B.log"
+  log_name: "meta-llama_3_2_3B.log"

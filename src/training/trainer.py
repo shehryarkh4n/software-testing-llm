@@ -36,7 +36,7 @@ def train_main(config_path: str):
     if cfg.model.is_local:
         model_name_or_path = cfg.model.model_dir
     else:
-        model_name_or_path = cfg.model.name
+        model_name_or_path = cfg.model.hf_name
 
     if cfg.model.architecture == "causal":
         model_class = AutoModelForCausalLM
@@ -62,6 +62,7 @@ def train_main(config_path: str):
         logger.info("Skipping BnB Config..")
         model = model_class.from_pretrained(
             model_name_or_path,
+            # device_map="auto",
             torch_dtype=torch.bfloat16,
             trust_remote_code=True
         )
@@ -101,7 +102,6 @@ def train_main(config_path: str):
     else:
         logger.info("Skipping PEFT Config...")
 
-    # 3. Data loading
     def get_split_dataset(dataset, split_ratio):
         # split_ratio: [train, eval, test]
         train_test = dataset.train_test_split(test_size=split_ratio[2])
@@ -128,7 +128,11 @@ def train_main(config_path: str):
             path = f"{prefix_path}_{split}.json"
             out[split] = load_dataset("json", data_files={split: path})[split]
         return out
-        
+    
+    # --------------------
+    # Dataset loading logic
+    # --------------------
+    
     if not getattr(cfg.dataset, "need_tokenization", False):
         logger.info("Tokenization not required, loading tokenized splits...")
         train_dataset = load_dataset("json", data_files={"train": cfg.dataset.tokenized_train_location})["train"]
@@ -141,31 +145,42 @@ def train_main(config_path: str):
         eval_dataset  = load_dataset("json", data_files={"eval":  cfg.dataset.processed_eval_location})["eval"]
         test_dataset  = load_dataset("json", data_files={"test":  cfg.dataset.processed_test_location})["test"]
     
-        # Now tokenize and save
         tokenize_func = partial(SPECIAL_PROCESSING_FUNCS[cfg.dataset.tokenizer_func], tokenizer, max_input_len=cfg.dataset.max_input_len)
         for split, ds in [("train", train_dataset), ("eval", eval_dataset), ("test", test_dataset)]:
             out = ds.map(tokenize_func, batched=True, remove_columns=ds.column_names, num_proc=cfg.training.dataloader_num_workers)
-            out_path = getattr(cfg.dataset.processed_path, f"tokenized_{split}_location")
+            out_path = getattr(cfg.dataset, f"tokenized_{split}_location")
             out.to_json(out_path)
+    
+        # Now load the tokenized versions for usage
+        train_dataset = load_dataset("json", data_files={"train": cfg.dataset.tokenized_train_location})["train"]
+        eval_dataset  = load_dataset("json", data_files={"eval":  cfg.dataset.tokenized_eval_location})["eval"]
+        test_dataset  = load_dataset("json", data_files={"test":  cfg.dataset.tokenized_test_location})["test"]
     
     else:
         logger.info("Loading raw data, special processing, then split and save...")
-        # Load and process
         raw_ds = load_dataset("json", data_files={"data": cfg.dataset.path})["data"]
         func_name = cfg.dataset.special_processing_func
         if func_name not in SPECIAL_PROCESSING_FUNCS:
             raise ValueError(f"Special processing function '{func_name}' not found in registry.")
+    
         processed_ds = SPECIAL_PROCESSING_FUNCS[func_name](tokenizer, raw_ds)
-        # Split
+    
+        # Split and save processed
         splits = get_split_dataset(processed_ds, cfg.dataset.split)
-        # Save processed splits
-        processed_paths = save_splits(splits, cfg.dataset.processed_path)
-        # Tokenize and save tokenized splits
+        save_splits(splits, getattr(cfg.dataset, f"processed_{split}_location"))
+    
+        # Tokenize and save tokenized versions
         tokenize_func = partial(SPECIAL_PROCESSING_FUNCS[cfg.dataset.tokenizer_func], tokenizer, max_input_len=cfg.dataset.max_input_len)
         for split, ds in splits.items():
             out = ds.map(tokenize_func, batched=True, remove_columns=ds.column_names, num_proc=cfg.training.dataloader_num_workers)
             out_path = getattr(cfg.dataset, f"tokenized_{split}_location")
             out.to_json(out_path)
+    
+        # Now load the tokenized splits to continue
+        train_dataset = load_dataset("json", data_files={"train": cfg.dataset.tokenized_train_location})["train"]
+        eval_dataset  = load_dataset("json", data_files={"eval":  cfg.dataset.tokenized_eval_location})["eval"]
+        test_dataset  = load_dataset("json", data_files={"test":  cfg.dataset.tokenized_test_location})["test"]
+
 
     # 6. Training arguments
     if cfg.training.training_args_type == "TrainingArguments":
@@ -188,7 +203,7 @@ def train_main(config_path: str):
         training_args = SFTConfig(
             output_dir=cfg.training.output_dir,
             num_train_epochs=cfg.training.num_train_epochs,
-            per_device_train_batch_size=cfg.dataset.batch_size,
+            per_device_train_batch_size=cfg.training.per_device_train_batch_size,
             learning_rate=cfg.training.learning_rate,
             gradient_accumulation_steps=cfg.training.gradient_accumulation_steps,
             eval_strategy=cfg.training.eval_strategy,
@@ -197,7 +212,7 @@ def train_main(config_path: str):
             logging_steps=cfg.training.logging_steps,
             report_to=cfg.training.report_to,
             seed=cfg.training.seed,
-            fp16=cfg.training.fp16,
+            # fp16=cfg.training.fp16,
             bf16=cfg.training.bf16,   
             dataset_text_field=cfg.training.dataset_text_field,
             dataloader_num_workers=cfg.training.dataloader_num_workers,

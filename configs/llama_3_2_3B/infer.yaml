@@ -2,15 +2,15 @@
 
 model:
   is_local: false
-  model_dir: "./"
-  name: "mistralai/Mistral-7B-Instruct-v0.3"
-  architecture: "causal"           # or "seq2seq"
+  model_dir: ""
+  name: "meta-llama/Llama-3.2-3B-Instruct"
+  architecture: "causal"        
   quantization: false
   tokenizer_pad_token: "eos_token"
-  tokenizer_padding_side: "right"
+  tokenizer_padding_side: "left"
 
 peft:
-  is_peft: true
+  is_peft: false
   type: "lora"
   r: 32
   lora_alpha: 64
@@ -33,34 +33,23 @@ bnb:
     bnb_4bit_use_double_quant: true
     bnb_4bit_compute_dtype: "bfloat16"
 
+infer:
+    save_path: "src/evaluation/results/methods2test/llama_3_2_3B"
+    pred_label: "ORIGINAL" # "ORIGINAL | FINETUNED"
+
 dataset:
   name: "mydataset"
-  path: "data/mydata.jsonl"
-  processed_path: ""
-  is_processed: false
+  processed_path: "src/data/datasets/methods2test/processed/llama_3_2_3B/processed_test.json"
   need_special_processing: false
-  special_processing_func: ""
+  special_processing_func: "llama_3_2_3B_template"
   split_seed: 42
-  num_workers: 8
-  batch_size: 4
-  max_input_len: 512
+  num_workers: 16
+  batch_size: 512
+  max_input_len: 720
   max_target_len: 256
-
-training:
-  training_args_type: "SFTConfig"
-  trainer_type: "SFTTrainer"
-  output_dir: "outputs/"
-  num_train_epochs: 3
-  learning_rate: 2e-4
-  gradient_accumulation_steps: 2
-  eval_strategy: "epoch"
-  save_strategy: "epoch"
-  save_total_limit: 2
-  logging_steps: 20
-  report_to: ["tensorboard"]
-  seed: 42
 
 misc:
   device: "cuda"
   notes: "experiment for Mistral7B with LoRA"
   log_dir: "logs/default"
+  log_name: "meta-llama_3_2_3B.log"
