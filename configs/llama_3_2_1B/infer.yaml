@@ -34,7 +34,7 @@ bnb:
     bnb_4bit_compute_dtype: "bfloat16"
 
 infer:
-    save_path: "src/evaluation/results/methods2test/llama_3_2_3B"
+    save_path: "src/evaluation/results/methods2test/llama_3_2_1B"
     pred_label: "ORIGINAL" # "ORIGINAL | FINETUNED"
 
 dataset:
