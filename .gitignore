@@ -172,3 +172,14 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# Others
+src/data/datasets/
+src/outputs/
+src/evaluation/results/
+src/test-artifacts
+logs/
+playground/
+local/
+src/evaluation/metric_files/
+src/data/exploration/
