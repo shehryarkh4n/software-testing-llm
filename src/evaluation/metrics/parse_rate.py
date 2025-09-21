@@ -1,5 +1,6 @@
 import javalang
 import re
+from tqdm import tqdm
 
 def is_trivially_invalid(code):
     # Heuristics to skip obviously broken code
@@ -17,9 +18,11 @@ def compute_parse_rate(predictions, refs=None):
     Try to parse each prediction with javalang.
     If prediction doesn't declare a class, wrap in a dummy class.
     """
+    
     total = len(predictions)
     success = 0
-    for code in predictions:
+    filtered_idx = []
+    for idx, code in enumerate(tqdm(predictions, desc="Parsing", unit="sample")):
         if is_trivially_invalid(code):
             continue  # skip early
         # If there's a class declaration, don't wrap; else, wrap in dummy class
@@ -27,6 +30,8 @@ def compute_parse_rate(predictions, refs=None):
         try:
             javalang.parse.parse(code_to_parse)
             success += 1
+            filtered_idx.append(idx)
         except (javalang.parser.JavaSyntaxError, javalang.tokenizer.LexerError, IndexError, TypeError):
             pass  # Parsing failed
-    return success / total if total > 0 else 0.0
+    score = success / total if total > 0 else 0.0
+    return score, filtered_idx

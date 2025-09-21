@@ -4,8 +4,8 @@ import re
 import os
 import json
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
-from metrics import METRIC_REGISTRY
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
+from src.evaluation.metrics import METRIC_REGISTRY
 
 def extract_reference_from_prompt(prompt: str):
     pattern = r"<\|start_header_id\|>assistant<\|end_header_id\|>(.*?)<\|eot_id\|>"
@@ -17,18 +17,18 @@ def extract_reference_from_prompt(prompt: str):
                 return clean
     return ""
 
-def run_metrics(orig, labels):
-
-    # ### REMOVE THIS ####
-    # orig = "src/data/datasets/methods2test/processed/llama_3_2_3B/processed_test.json"
-    # labels = "src/evaluation/results/methods2test/llama_3_2_1B/predictions_1750583407.json"
-    # ### REMOVE THIS ####
+def run_metrics(orig, labels, num_examples=None):
 
     ds = load_dataset("json", data_files={"test": orig})["test"]
+    if num_examples is not None:
+        ds = ds.select(range(min(num_examples, len(ds))))
+    
     references = [extract_reference_from_prompt(ex["prompt"]) for ex in ds]
 
     with open(labels, 'r') as f:
         predictions = json.load(f)
+    if num_examples is not None:
+        predictions = predictions[:num_examples]
 
     for name, metric_func in METRIC_REGISTRY.items():
         try:
@@ -42,6 +42,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--original_dataset", "-od", type=str, default=None)
     parser.add_argument("--predictions", "-p", type=str, default=None)
+    parser.add_argument("--num_examples", "-e", type=int, default=None)
     args = parser.parse_args()
 
-    run_metrics(args.original_dataset, args.predictions)
+    run_metrics(args.original_dataset, args.predictions, args.num_examples)

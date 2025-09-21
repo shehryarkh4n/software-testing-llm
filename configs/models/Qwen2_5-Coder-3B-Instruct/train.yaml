@@ -1,0 +1,93 @@
+# customizable as needed. maybe explore multiple yaml files?
+
+model:
+  is_local: false
+  model_dir: "./"
+  hf_name: "Qwen/Qwen2.5-Coder-3B-Instruct"
+  name: "Qwen2.5-Coder-3B-Instruct"
+  architecture: "causal"        
+  tokenizer_pad_token: "eos_token"
+  tokenizer_padding_side: "right"
+
+peft:
+  is_peft: true
+  type: "lora"
+  r: 8
+  lora_alpha: 16
+  lora_dropout: 0.05
+  bias: "none"
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+  task_type: "CAUSAL_LM"
+
+bnb:
+    is_bnb: false
+    bnb_4bit_quant_type: "nf4"
+    bnb_4bit_use_double_quant: true
+    bnb_4bit_compute_dtype: "bfloat16"
+
+dataset:
+  name: "methods2test"
+  master_path: ""
+  train_path: "src/data/datasets/methods2test/original/files/train.json"
+  test_path: "src/data/datasets/methods2test/original/files/test.json"
+  eval_path: "src/data/datasets/methods2test/original/files/eval.json"
+  need_special_processing: false
+  need_tokenization: false
+  special_processing_funcs:
+    train: "dataset_preprocessing_with_target"
+    eval:  "dataset_preprocessing_with_target"
+    test:  "dataset_preprocessing_prompt_only"
+  tokenizer_funcs:
+    train: "dataset_tokenization"
+    eval:  "dataset_tokenization"
+    test:  "dataset_tokenization_infer"
+  split_seed: 42
+  max_input_len: 3584
+  processed_train_location: "src/data/datasets/methods2test/processed/Qwen2_5-Coder-3B-Instruct/processed_train.json"
+  processed_eval_location: "src/data/datasets/methods2test/processed/Qwen2_5-Coder-3B-Instruct/processed_eval.json"
+  processed_test_location: "src/data/datasets/methods2test/processed/Qwen2_5-Coder-3B-Instruct/processed_test.json"
+  tokenized_train_location: "src/data/datasets/methods2test/tokenized/Qwen2_5-Coder-3B-Instruct/tokenized_train.json"
+  tokenized_eval_location: "src/data/datasets/methods2test/tokenized/Qwen2_5-Coder-3B-Instruct/tokenized_eval.json"
+  tokenized_test_location: "src/data/datasets/methods2test/tokenized/Qwen2_5-Coder-3B-Instruct/tokenized_test.json"
+  split: []
+
+training:
+  training_args_type: "SFTConfig"
+  trainer_type: "SFTTrainer"
+  output_dir: "src/outputs/Qwen2_5-Coder-3B-Instruct/"
+  dataset_text_field: "prompt"
+  num_train_epochs: 10
+  learning_rate: 0.0002
+  lr_scheduler_type: "linear"
+  per_device_train_batch_size: 8
+  gradient_accumulation_steps: 4
+  eval_strategy: "epoch"
+  save_strategy: "epoch"
+  save_total_limit: 2
+  logging_steps: 100
+  optim: "adamw_8bit"
+  weight_decay: 0.01
+  warmup_steps: 1000
+  report_to: "tensorboard"
+  seed: 42
+  bf16: true
+  fp16: false
+  dataloader_num_workers: 32
+  ddp_find_unused_parameters: false
+  dataloader_drop_last: true
+  remove_unused_columns: false
+
+misc:
+  accelerate_config: "configs/accelerate/qwen.json"
+  registered_models_yaml: "configs/common/registered_models.yaml"
+  device: "cuda"
+  notes: "Original Qwen2_5-Coder-3B-Instruct"
+  log_dir: "logs/default/Qwen2_5-Coder-3B-Instruct"
+  log_name: "Qwen2_5-Coder-3B-Instruct.log"

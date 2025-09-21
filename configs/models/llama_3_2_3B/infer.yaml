@@ -1,9 +1,8 @@
-# customizable as needed. maybe explore multiple yaml files?
-
 model:
   is_local: false
-  model_dir: ""
-  name: "meta-llama/Llama-3.2-1B-Instruct"
+  model_dir: "src/outputs/llama_3_2_3B/final"
+  model_name_simple: "llama"
+  name: "meta-llama/Llama-3.2-3B-Instruct"
   architecture: "causal"        
   quantization: false
   tokenizer_pad_token: "eos_token"
@@ -34,23 +33,22 @@ bnb:
     bnb_4bit_compute_dtype: "bfloat16"
 
 infer:
-    save_path: "src/evaluation/results/methods2test/llama_3_2_1B"
-    pred_label: "ORIGINAL" # "ORIGINAL | FINETUNED"
+    save_path: "src/evaluation/results/methods2test/llama_3_2_3B"
+    pred_label: "FINETUNED" # "ORIGINAL | FINETUNED"
 
 dataset:
-  name: "methods2test"
+  name: "mydataset"
   processed_path: "src/data/datasets/methods2test/processed/llama_3_2_3B/processed_test.json"
   need_special_processing: false
   special_processing_func: "llama_3_2_3B_template"
   split_seed: 42
   num_workers: 16
-  batch_size: 512
+  batch_size: 128
   max_input_len: 720
   max_target_len: 256
-
 
 misc:
   device: "cuda"
   notes: "experiment for Mistral7B with LoRA"
   log_dir: "logs/default"
-  log_name: "meta-llama_3_2_1B.log"
+  log_name: "meta-llama_3_2_3B.log"

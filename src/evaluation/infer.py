@@ -7,139 +7,145 @@ from tqdm import trange
 import os
 import re
 import json
+import gc
 import time
 
 # Fix import path for src/
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'src')))
 from evaluation.metrics import METRIC_REGISTRY
 
-def extract_reference_from_prompt(prompt: str):
-    pattern = r"<\|start_header_id\|>assistant<\|end_header_id\|>(.*?)<\|eot_id\|>"
-    matches = re.findall(pattern, prompt, flags=re.DOTALL)
-    if matches:
-        for ref in reversed(matches):
-            clean = ref.strip()
-            if clean:
-                return clean
-    return ""
-
-
-def get_prompt_for_inference(prompt: str):
-    matches = list(re.finditer(r"<\|start_header_id\|>assistant<\|end_header_id\|>", prompt))
-    if not matches:
-        return prompt.strip()
-    if len(matches) == 1:
-        return prompt[:matches[0].end()].strip()
-    return prompt[:matches[-2].end()].strip()
-
-def extract_java_code(text: str) -> str:
-    # quick check to save a regex run
-    if not text.lstrip().startswith("```java"):
-        return text
-
-    # Strip the first line
-    after_open = text.lstrip().split("\n", 1)
-    if len(after_open) == 1:
-        # There was no newline after the opening fence (unlikely but safe-guard :D)
-        return text
-    body = after_open[1]
-
-    # … then look for the first closing fence
-    closing_pos = body.find("```")
-    if closing_pos != -1:
-        body = body[:closing_pos]
-
-    return body.rstrip()     # drop trailing whitespace from the extracted code
-
-def infer(config_path, num_samples=None, save_predictions=False):
+def infer_main(config_path, num_samples=None, save_predictions=False):
+    
+    logger.info("=" * 25)
+    logger.info("STAGE 1: LOADING CONFIG & MODEL")
+    logger.info("=" * 25 + "\n")
+    
+    start_time = time.time()
     if not config_path:
-        print("No Config Path!")
+        print("[1.1] No Config Path!")
         return
-        
     cfg = OmegaConf.load(config_path)
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info("[1.1] Config loaded successfully")
     
     FT_MODEL = cfg.model.model_dir or cfg.model.name
-    print("Using: ", FT_MODEL)
+    if save_predictions:
+        pred_label = cfg.infer.pred_label or "UNKNOWN"
+        out_path = f"{cfg.infer.save_path}/predictions_{pred_label}_{int(time.time())}.json"
+        logger.info(f"[1.1] Inference Output will be saved to: {out_path}")
     
+    logger.info(f"[1.2] Using: {FT_MODEL}")
+
+    # Load model
     model = AutoModelForCausalLM.from_pretrained(
-        FT_MODEL,
+        cfg.model.model_dir or cfg.model.name,
         torch_dtype=torch.bfloat16,
     ).to(device)
+    logger.info("[1.2] Model loaded...")
     
-    tokenizer = AutoTokenizer.from_pretrained(FT_MODEL)
+    tokenizer = AutoTokenizer.from_pretrained(cfg.model.model_dir or cfg.model.name)
+    MAX_CTX       = tokenizer.model_max_length       # 4096 for Llama-3
+    MAX_NEW_TOK   = 512                              # keep this
+    max_input_len = MAX_CTX - MAX_NEW_TOK
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
+    
     model.eval()
-    
-    if hasattr(cfg.model, "tokenizer_pad_token") and cfg.model.tokenizer_pad_token:
-        if cfg.model.tokenizer_pad_token == "eos_token":
-            tokenizer.pad_token = tokenizer.eos_token
-    if hasattr(cfg.model, "tokenizer_padding_side") and cfg.model.tokenizer_padding_side:
-        tokenizer.padding_side = cfg.model.tokenizer_padding_side
+    logger.info(f"[1.2] Model Details:\n - max_input_len: {max_input_len}\n - new_tokens: {MAX_NEW_TOK}\n - padding_side: left\n...")
 
-    tokenizer.padding_side="left"
+    logger.info("=" * 25)
+    logger.info("STAGE 2: LOADING & PROCESSING DATASETS")
+    logger.info("=" * 25 + "\n")
+    
+    # Load correctly processed test data
     ds = load_dataset("json", data_files={"test": cfg.dataset.processed_path})["test"]
     if num_samples is None:
         num_samples = len(ds)
     examples = ds.select(range(min(num_samples, len(ds))))
-    inputs = [get_prompt_for_inference(ex["prompt"]) for ex in examples]
-    references = [extract_reference_from_prompt(ex["prompt"]) for ex in examples]
-
-    batch_size = getattr(cfg.dataset, "batch_size", 8)
+    
+    logger.info(f"[2.1] Examples selected: {num_samples}/{len(ds)}")
+    
+    # Now your data should have separate 'prompt' and 'reference' columns
+    inference_prompts = [ex["prompt"] for ex in examples]
+    references = [ex["reference"] for ex in examples]
+    # Generate predictions
+    batch_size = getattr(cfg.dataset, "batch_size", 4)
     predictions = []
-    for i in trange(0, len(inputs), batch_size, desc="Generating"):
-        batch_inputs = inputs[i:i+batch_size]
+
+    logger.info(f"[2.2]: Inference Prompts & References Separated")
+    torch.cuda.empty_cache()
+    gc.collect()
+
+    logger.info("=" * 25)
+    logger.info("STAGE 3: Inference")
+    logger.info("=" * 25 + "\n")
+    
+    logger.info(f"Starting inference with batch size {batch_size}")
+    logger.info(f"Initial GPU Memory: {torch.cuda.memory_allocated() / 1e9:.2f} GB")
+    
+    for i in trange(0, len(inference_prompts), batch_size, desc="Generating"):
+        if i > 0:  # Don't clear on first iteration (nothing to clear)
+            torch.cuda.empty_cache()
+            gc.collect()
+        
+        batch_inputs = inference_prompts[i:i+batch_size]
+        
         enc = tokenizer(
             batch_inputs, 
             return_tensors="pt", 
             padding=True, 
             truncation=True, 
-            max_length=cfg.dataset.max_input_len
+            max_length=max_input_len
         ).to(device)
-
-        # length of the *unpadded* prompt for every sample
-        orig_len = enc.input_ids.shape[1]
-
+        
         with torch.no_grad():
             outputs = model.generate(
-                **enc,
-                max_new_tokens=512,
+                max_new_tokens=MAX_NEW_TOK,
+                input_ids=enc.input_ids,
+                attention_mask=enc.attention_mask,
+                do_sample=True,
                 eos_token_id=tokenizer.eos_token_id,
-                pad_token_id=tokenizer.eos_token_id
+                pad_token_id=tokenizer.pad_token_id
             )
-        for seq in outputs:
-            gen_only   = seq[orig_len:]             # strip entire input (pads + prompt)
-            prediction = tokenizer.decode(gen_only, skip_special_tokens=True)
+        
+        for j, seq in enumerate(outputs):
+            input_length = (enc.input_ids[j] != tokenizer.pad_token_id).sum().item()
+            generated_tokens = seq[input_length:]
+            prediction = tokenizer.decode(generated_tokens, skip_special_tokens=True)
             predictions.append(extract_java_code(prediction))
+            
+    # ---------------------------- DROP IN, UNCOMMENT
+    
+    # print("\n--- Metric Results ---")
+    # for name, metric_func in METRIC_REGISTRY.items():
+    #     try:
+    #         score = metric_func(predictions, references)
+    #         print(f"{name}: {score}")
+    #     except Exception as e:
+    #         print(f"{name}: ERROR ({e})")
 
-    print("\n--- Metric Results ---")
-    for name, metric_func in METRIC_REGISTRY.items():
-        try:
-            score = metric_func(predictions, references)
-            print(f"{name}: {score}")
-        except Exception as e:
-            print(f"{name}: ERROR ({e})")
+    # ---------------------------- DROP IN, UNCOMMENT
 
+    logger.info("=" * 25)
+    logger.info("STAGE 4: SAVING & CLEANUP")
+    logger.info("=" * 25 + "\n")
+    
     if save_predictions:
         pred_label = cfg.infer.pred_label or "UNKNOWN"
         out_path = f"{cfg.infer.save_path}/predictions_{pred_label}_{int(time.time())}.json"
         with open(out_path, "w") as f:
             json.dump(predictions, f, indent=2)
-        print(f"\nSaved predictions to {out_path}")
+        logger.info(f" [4.1] Saved predictions to {out_path}")
 
     # Free up memory
+    logger.info(f" [4.2] Cleaning up memory...")
     del model, tokenizer
     torch.cuda.empty_cache()
     if hasattr(torch.cuda, "ipc_collect"):
         torch.cuda.ipc_collect()
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, required=True, help="Path to YAML config")
-    parser.add_argument("--num_examples", "-n", type=int, default=None,
-                        help="How many records to run (default: whole set)")
-    parser.add_argument("--save_predictions",  action="store_true",
-                        help="Write predictions_<timestamp>.json when done")
-    args = parser.parse_args()
-
-    infer(args.config, args.num_examples, args.save_predictions)
+    elapsed_hours = (time.time() - start_time) / 3600.0
+    logger.info("\n" + "=" * 25)
+    logger.info(f"INFERENCE PIPELINE FINISHED | TIME: {elapsed_hours} HOURS")
+    logger.info("=" * 25 + "\n")
