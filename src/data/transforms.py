@@ -1,10 +1,10 @@
 from __future__ import annotations
-from typing import Iterable, Optional
+from typing import Optional, Iterable
 from datasets import Dataset
 from transformers import PreTrainedTokenizerBase
 from tqdm import tqdm
 
-SPECIAL_PROCESSING_FUNCS = {}
+SPECIAL_PROCESSING_FUNCS: dict[str, callable] = {}
 
 SYSTEM_INSTRUCTION = (
     "You are an expert coder, providing exactly the code requested by the user."
@@ -22,65 +22,58 @@ USER_INSTRUCTION = (
     "6. No extra helpers, comments, or unrelated code."
 )
 
-
-def register_func(name):
+def register_func(name: str):
     def decorator(fn):
         SPECIAL_PROCESSING_FUNCS[name] = fn
         return fn
     return decorator
 
-
 # ----------------------------
-# Helpers
+# Helpers (now actually used)
 # ----------------------------
 
 def _instr_len(tokenizer: PreTrainedTokenizerBase) -> int:
     return len(tokenizer(USER_INSTRUCTION, add_special_tokens=False).input_ids)
 
-
-def _build_prompt(tokenizer: PreTrainedTokenizerBase, source_code: str, target: Optional[str], include_target: bool) -> str:
+def _build_prompt(
+    tokenizer: PreTrainedTokenizerBase,
+    source_code: str,
+    target: Optional[str],
+    include_target: bool,
+) -> str:
     messages = [
         {"role": "system", "content": SYSTEM_INSTRUCTION},
-        {"role": "user", "content": USER_INSTRUCTION + source_code},
+        {"role": "user",   "content": USER_INSTRUCTION + source_code},
     ]
     if include_target and target is not None:
         messages.append({"role": "assistant", "content": target})
-    # When include_target is False, we omit assistant so the generation starts from scratch.
     return tokenizer.apply_chat_template(
         messages,
         tokenize=False,
         add_generation_prompt=True,
     )
 
-
-from datasets import Dataset
-from tqdm import tqdm
-from transformers import PreTrainedTokenizerBase
+# ----------------------------
+# Core processing
+# ----------------------------
 
 def _process_dataset(
     tokenizer: PreTrainedTokenizerBase,
-    ds,
+    ds: Dataset,
     *,
     include_target: bool,
     max_ctx: int = 4096,
     reserved_new: int = 512,
     src_field: str = "src_fm_fc_ms_ff",
     tgt_field: str = "target",
-):
+) -> Dataset:
     """
-    Build prompts for an HF Dataset and return a new Dataset with two columns:
-
-      • prompt – chat‑formatted string (system + user + optional assistant)
+    Build prompts for an HF Dataset and return a new Dataset with:
+      • prompt – chat-formatted string (system + user + optional assistant)
       • idx    – original row index kept for fairness intersection later
-
-    A sample is kept if the *prompt portion* (system + user + src) fits in
-    `max_ctx - reserved_new` tokens with this tokenizer. Target length is not
-    checked here (output tokens are generated or supervised separately).
+    Keeps a sample if (system + user + src) ≤ max_ctx - reserved_new tokens.
     """
-    def _instr_len(tok):
-        return len(tok(USER_INSTRUCTION, add_special_tokens=False).input_ids)
-
-    instr_len = _instr_len(tokenizer)
+    instr_tokens = _instr_len(tokenizer)
     max_prompt_tokens = max_ctx - reserved_new
 
     prompts: list[str] = []
@@ -92,29 +85,15 @@ def _process_dataset(
 
     for i, (src, tgt) in enumerate(tqdm(zip(sources, targets), total=len(ds))):
         src_len = len(tokenizer(src, add_special_tokens=False).input_ids)
-        if instr_len + src_len > max_prompt_tokens:
+        if instr_tokens + src_len > max_prompt_tokens:
             skipped += 1
             continue
-
-        messages = [
-            {"role": "system", "content": SYSTEM_INSTRUCTION},
-            {"role": "user",   "content": USER_INSTRUCTION + src},
-        ]
-        if include_target and tgt is not None:
-            messages.append({"role": "assistant", "content": tgt})
-
-        prompt = tokenizer.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-        )
+        prompt = _build_prompt(tokenizer, src, tgt, include_target=include_target)
         prompts.append(prompt)
         kept_indices.append(i)
 
-    print(f"Prompt‑build finished – kept {len(kept_indices)}, skipped {skipped}")
+    print(f"Prompt-build finished – kept {len(kept_indices)}, skipped {skipped}")
     return Dataset.from_dict({"prompt": prompts, "idx": kept_indices})
-
-
 
 # ----------------------------
 # Public registered functions
@@ -123,11 +102,11 @@ def _process_dataset(
 @register_func("dataset_preprocessing_with_target")
 def dataset_preprocessing_with_target(
     tokenizer: PreTrainedTokenizerBase,
-    ds,
+    ds: Dataset,
     add_system_prompt: bool = False,  # kept for backward compat; unused
     MAX_CTX: int = 4096,
     RESERVED_NEW: int = 512,
-):
+) -> Dataset:
     return _process_dataset(
         tokenizer,
         ds,
@@ -136,15 +115,14 @@ def dataset_preprocessing_with_target(
         reserved_new=RESERVED_NEW,
     )
 
-
 @register_func("dataset_preprocessing_prompt_only")
 def dataset_preprocessing_prompt_only(
     tokenizer: PreTrainedTokenizerBase,
-    ds,
+    ds: Dataset,
     add_system_prompt: bool = False,
     MAX_CTX: int = 4096,
     RESERVED_NEW: int = 512,
-):
+) -> Dataset:
     return _process_dataset(
         tokenizer,
         ds,
@@ -153,22 +131,17 @@ def dataset_preprocessing_prompt_only(
         reserved_new=RESERVED_NEW,
     )
 
-
 # ------- Tokenization -------
 
 @register_func("dataset_tokenization")
 def dataset_tokenization(tokenizer: PreTrainedTokenizerBase, example, max_input_len: int):
     tokens = tokenizer(example["prompt"], padding="max_length", truncation=True, max_length=max_input_len)
-    # Supervised fine-tuning: use full-sequence labels (your original choice). Pad tokens ignored.
     tokens["labels"] = [
         -100 if token == tokenizer.pad_token_id else token for token in tokens["input_ids"]
     ]
     return tokens
 
-
 @register_func("dataset_tokenization_infer")
 def dataset_tokenization_infer(tokenizer: PreTrainedTokenizerBase, example, max_input_len: int):
-    """Tokenization for inference-only prompts. No labels are produced."""
     tokens = tokenizer(example["prompt"], padding="max_length", truncation=True, max_length=max_input_len)
-    # Do not include labels; generation code will call model.generate(...)
     return {k: tokens[k] for k in ("input_ids", "attention_mask")}

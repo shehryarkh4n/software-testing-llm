@@ -10,12 +10,18 @@ import json
 import gc
 import time
 
+from bin.log_setup import setup_logging
+from src.evaluation.helper import extract_java_code
 # Fix import path for src/
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..', 'src')))
 from evaluation.metrics import METRIC_REGISTRY
 
-def infer_main(config_path, num_samples=None, save_predictions=False):
+def infer_main(config_path, num_samples=None, save_predictions=False, show_metrics=False):
     
+    cfg = OmegaConf.load(config_path)
+
+    # One logger; handlers only on rank 0
+    logger = setup_logging(cfg.misc.log_dir, cfg.misc.log_name)
     logger.info("=" * 25)
     logger.info("STAGE 1: LOADING CONFIG & MODEL")
     logger.info("=" * 25 + "\n")
@@ -115,17 +121,14 @@ def infer_main(config_path, num_samples=None, save_predictions=False):
             prediction = tokenizer.decode(generated_tokens, skip_special_tokens=True)
             predictions.append(extract_java_code(prediction))
             
-    # ---------------------------- DROP IN, UNCOMMENT
-    
-    # print("\n--- Metric Results ---")
-    # for name, metric_func in METRIC_REGISTRY.items():
-    #     try:
-    #         score = metric_func(predictions, references)
-    #         print(f"{name}: {score}")
-    #     except Exception as e:
-    #         print(f"{name}: ERROR ({e})")
-
-    # ---------------------------- DROP IN, UNCOMMENT
+    if show_metrics:
+        logger.info("\n--- Metric Results ---")
+        for name, metric_func in METRIC_REGISTRY.items():
+            try:
+                score = metric_func(predictions, references)
+                print(f"{name}: {score}")
+            except Exception as e:
+                print(f"{name}: ERROR ({e})")
 
     logger.info("=" * 25)
     logger.info("STAGE 4: SAVING & CLEANUP")

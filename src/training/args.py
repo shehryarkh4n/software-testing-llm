@@ -9,7 +9,7 @@ def _is_bfloat16_supported() -> bool:
 
 
 def build_sft_config(cfg, logger) -> SFTConfig:
-    # Honor config values; ensure bf16 default matches hardware if user left it true
+    # Ensure bf16 default matches hardware if user left it true
     logger.info("=" * 25)
     logger.info("STAGE 3: BUILDING SFT ARGUMENTS")
     logger.info("=" * 25 + "\n")
@@ -29,7 +29,7 @@ def build_sft_config(cfg, logger) -> SFTConfig:
     logger.info("    Seed             : %d", cfg.training.seed) 
     logger.info("    BF16 Enabled     : %s", bf16_flag) 
 
-    return SFTConfig(
+    configObj = SFTConfig(
         output_dir=cfg.training.output_dir,
         fsdp                = "full_shard",
         fsdp_config         = cfg.misc.accelerate_config,
@@ -55,9 +55,11 @@ def build_sft_config(cfg, logger) -> SFTConfig:
         warmup_steps=getattr(cfg.training, "warmup_steps", 0),
         label_names=["labels"]
     )
+    
     logger.info("[✓] STAGE 3 complete: Arguments built.\n\n")
+    return configObj
 
-# For debugging usage
+# Debugging usage
 def set_library_verbosity(logger: logging.Logger):
     """Align HF/Datasets logging with our logger level."""
     level = logger.getEffectiveLevel()

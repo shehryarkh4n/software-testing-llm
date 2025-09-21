@@ -32,9 +32,10 @@ def infer(
     config: Path = typer.Option(..., "--config", "-c", help="Path to inference config YAML."),
     num_examples: int = typer.Option(None, "--num_examples", "-n", help="Number of records to run. Default: all."),
     save_predictions: bool = typer.Option(False, "--save_predictions", help="Save predictions_<timestamp>.json"),
+    show_metrics: bool = typer.Option(False, "--show_metrics", help="Show metrics against the predictions")
 ):
     """Run inference on a model (you may also launch this under accelerate)."""
-    infer(str(config), num_examples, save_predictions)
+    infer_main(str(config), num_examples, save_predictions, show_metrics)
 
 @app.command()
 def metrics(

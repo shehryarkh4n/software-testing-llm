@@ -65,30 +65,6 @@ def run_metrics(orig, labels, model, num_examples=None):
             updated_indices = [original_indices[i] for i in filtered_idx]
     
             if name in ['parse_rate', 'compile_rate']:
-                # Save failed outputs with original indices
-                failed_idx = [i for i in range(len(current_predictions)) if i not in filtered_idx]
-                # failed_outputs = [
-                #     {
-                #         "original_idx": original_indices[i],
-                #         "prediction": current_predictions[i]
-                #     }
-                #     for i in failed_idx
-                # ]
-                # with open(f"failed_{name.split('_')[0]}.json", 'w') as f:
-                #     json.dump(failed_outputs, f, indent=2)
-    
-                # Save successful predictions with original indices if final step
-                if name == 'parse_rate' and updated_predictions:
-                    success_outputs = [
-                        {
-                            "original_idx": idx,
-                            "prediction": pred
-                        }
-                        for idx, pred in zip(updated_indices, updated_predictions)
-                    ]
-                    with open(f"success_{name.split('_')[0]}.json", 'w') as f:
-                        json.dump(success_outputs, f, indent=2)
-                    return
                 # Update for next round
                 current_predictions = updated_predictions
                 current_references = updated_references
